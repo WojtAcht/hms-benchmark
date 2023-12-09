@@ -2,6 +2,10 @@ library(smoof)
 library(hmsr)
 library(GA)
 library(readr)
+library(foreach)
+library(doParallel)
+
+registerDoParallel(cores = 6)
 
 sprouting_default_euclidean_distances <- function(sigma) {
   sprouting_condition_distance_ratio <- 0.6
@@ -42,7 +46,7 @@ hms_vs_ga <-
 
     run_hms <- function(seed) {
       ga_config <- list(
-        list(pmutation = 0.4),
+        list(pmutation = 0.6, mutation = rtnorm_mutation(lower, upper, sigma[[1]])),
         list(
           pmutation = 0.2,
           mutation = rtnorm_mutation(lower, upper, sigma[[2]])
@@ -105,31 +109,47 @@ hms_vs_ga <-
       list("fitness" = fitness_value, "time" = (end - start))
     }
 
+    NULL_RESULT <- list("fitness" = NA, "time" = NA)
+
     hms <- mapply(function(seed) {
-      run_hms(seed)
+      tryCatch(run_hms(seed), error = function(e) {
+        message(e)
+        NULL_RESULT
+      })
     }, seeds)
     ga <- mapply(function(seed) {
-      run_ga(seed)
+      tryCatch(run_ga(seed), error = function(e) {
+        message(e)
+        NULL_RESULT
+      })
     }, seeds)
+
+    hms <- hms[, !is.na(hms["fitness", ])]
+    ga <- ga[, !is.na(ga["fitness", ])]
 
     list(hms = hms, ga = ga)
   }
 
 
 get_hms_vs_ga_res <- function(budgets, fitness_functions) {
-  all_results <- list()
-  for (fitness_function in fitness_functions) {
-    results <- list()
-    for (budget in budgets) {
-      result <- hms_vs_ga(budget, fitness_function)
-      results[[paste("ga_", budget, sep = "")]] <-
-        result$ga
-      results[[paste("hms_", budget, sep = "")]] <-
-        result$hms
-    }
-    all_results[[attr(fitness_function, "name")]] <-
+  all_results <-
+    foreach(fitness_function = fitness_functions) %dopar% {
+      results <- list()
+      for (budget in budgets) {
+        result <- hms_vs_ga(budget, fitness_function)
+        results[[paste("ga_", budget, sep = "")]] <-
+          result$ga
+        results[[paste("hms_", budget, sep = "")]] <-
+          result$hms
+        results[["global.opt.value"]] <-
+          attr(fitness_function, "global.opt.value")
+      }
       results
-  }
+    }
+  names(all_results) <-
+    lapply(fitness_functions, function(fitness_function) {
+      attr(fitness_function, "name")
+    })
   all_results
 }
 
@@ -156,11 +176,12 @@ get_names <- function(budgets) {
 }
 
 plot_hms_vs_ga <-
-  function(results, title, dir_path) {
+  function(results, title, dir_path, budgets) {
     path <- paste(dir_path, title, ".jpg", sep = "")
     jpeg(path, width = 1600, height = 1200)
     cols <- tail(rainbow(3, s = 0.1), n = 2)
     at <- get_at(budgets)
+    results$global.opt.value <- NULL
     fitness_values <-
       lapply(results, function(result) {
         -1 * unlist(result["fitness", ])
@@ -190,7 +211,7 @@ plot_hms_vs_ga <-
   }
 
 generate_data_frame <-
-  function(all_results) {
+  function(all_results, budgets) {
     mean_times <- c()
     mean_values <- c()
     q_25_values <- c()
@@ -199,6 +220,7 @@ generate_data_frame <-
     min_values <- c()
     max_values <- c()
     function_name_values <- c()
+    global_opt_values <- c()
     budget_values <- c()
     for (fitness_function_name in names(all_results)) {
       fitness_function_values <- all_results[[fitness_function_name]]
@@ -225,6 +247,8 @@ generate_data_frame <-
           c(function_name_values, fitness_function_name)
         budget_values <-
           c(budget_values, budget)
+        global_opt_values <-
+          c(global_opt_values, fitness_function_values[["global.opt.value"]])
       }
     }
     data.frame(
@@ -236,7 +260,8 @@ generate_data_frame <-
       q_50 = q_50_values,
       mean = mean_values,
       q_75 = q_75_values,
-      max = max_values
+      max = max_values,
+      global_opt_values = global_opt_values
     )
   }
 
@@ -247,20 +272,21 @@ run_experiment <-
     experiment_dir_path <- paste("./", experiment_name, "/", sep = "")
     dir.create(experiment_dir_path)
     all_results <- get_hms_vs_ga_res(budgets, fitness_functions)
+    data_frame <-
+      generate_data_frame(all_results, budgets)
+    write.csv(
+      data_frame,
+      paste(experiment_dir_path, "results.csv", sep = "")
+    )
     for (fitness_function_name in names(all_results)) {
       fitness_function_results <- all_results[[fitness_function_name]]
       plot_hms_vs_ga(
         fitness_function_results,
         fitness_function_name,
-        experiment_dir_path
+        experiment_dir_path,
+        budgets
       )
     }
-    data_frame <-
-      generate_data_frame(all_results)
-    write.csv(
-      data_frame,
-      paste(experiment_dir_path, "results.csv", sep = "")
-    )
   }
 
 # Run experiment:
@@ -272,7 +298,7 @@ FITNESS_FUNCTIONS <- list(
   smoof::makeRastriginFunction(5)
 )
 
-run_experiment("main", FITNESS_FUNCTIONS, BUDGETS)
-
-results <- read_csv("main/results.csv")
-View(results)
+# run_experiment("custom-cache", FITNESS_FUNCTIONS, BUDGETS)
+#
+# results <- read_csv("main/results.csv")
+# View(results)
