@@ -4,74 +4,32 @@ library(GA)
 library(readr)
 library(foreach)
 library(doParallel)
+source("hms_config.R")
 
 registerDoParallel(cores = 6)
 
-sprouting_default_euclidean_distances <- function(sigma) {
-  sprouting_condition_distance_ratio <- 0.6
-  lapply(sigma, function(x) {
-    sum(x * sprouting_condition_distance_ratio)
-  })
-}
-
-default_sigma <- function(lower, upper, tree_height) {
-  sigma_ratio <- 0.04
-  sigma_exponent <- 0.5
-  domain_length <- upper - lower
-  sigma <- list()
-  for (height in 1:tree_height) {
-    sigma <- c(sigma, list(domain_length * sigma_ratio))
-    sigma_ratio <- sigma_ratio * sigma_exponent
-  }
-  sigma
-}
-
 hms_vs_ga <-
   function(evaluations,
-           fitness_function) {
+           fitness_function,
+           config = "sea_two_levels") {
     seeds <- 1141:1171
 
     params <-
       attr(fitness_function, "par.set")$pars$x
     lower <- params[["lower"]]
     upper <- params[["upper"]]
-    dimensions <- length(lower)
-    sigma <- default_sigma(lower, upper, 3)
-    sprouting_distances <-
-      sprouting_default_euclidean_distances(sigma)
 
     fitness <- function(x) {
       -1 * fitness_function(x)
     }
 
     run_hms <- function(seed) {
-      ga_config <- list(
-        list(pmutation = 0.6, mutation = rtnorm_mutation(lower, upper, sigma[[1]])),
-        list(
-          pmutation = 0.2,
-          mutation = rtnorm_mutation(lower, upper, sigma[[2]])
-        ),
-        list(
-          pmutation = 0.2,
-          mutation = rtnorm_mutation(lower, upper, sigma[[3]])
-        )
-      )
-
       set.seed(seed)
-
-      result <- hmsr::hms(
-        fitness = fitness,
-        tree_height = 3,
-        lower = lower,
-        upper = upper,
-        run_metaepoch = ga_metaepoch(ga_config),
-        population_sizes = c(50, 25, 10),
-        sigma = sigma,
-        gsc = gsc_max_fitness_evaluations(evaluations),
-        sc = sc_max_metric(euclidean_distance, sprouting_distances),
-        lsc = lsc_metaepochs_without_improvement(7),
-        monitor_level = "none"
-      )
+      get_params_fn <- hms_configs[[config]]
+      params <- get_params_fn(lower, upper)
+      params[["fitness"]] <- fitness
+      params[["gsc"]] <- gsc_max_fitness_evaluations(evaluations)
+      result <- do.call(hmsr::hms, params)
       fitness_value <- -1 * result@best_fitness
       list(
         "fitness" = fitness_value,
@@ -131,12 +89,12 @@ hms_vs_ga <-
   }
 
 
-get_hms_vs_ga_res <- function(budgets, fitness_functions) {
+get_hms_vs_ga_res <- function(budgets, fitness_functions, config) {
   all_results <-
     foreach(fitness_function = fitness_functions) %dopar% {
       results <- list()
       for (budget in budgets) {
-        result <- hms_vs_ga(budget, fitness_function)
+        result <- hms_vs_ga(budget, fitness_function, config)
         results[[paste("ga_", budget, sep = "")]] <-
           result$ga
         results[[paste("hms_", budget, sep = "")]] <-
@@ -268,10 +226,11 @@ generate_data_frame <-
 run_experiment <-
   function(experiment_name,
            fitness_functions,
-           budgets) {
+           budgets,
+           config = "sea_two_levels") {
     experiment_dir_path <- paste("./", experiment_name, "/", sep = "")
     dir.create(experiment_dir_path)
-    all_results <- get_hms_vs_ga_res(budgets, fitness_functions)
+    all_results <- get_hms_vs_ga_res(budgets, fitness_functions, config)
     data_frame <-
       generate_data_frame(all_results, budgets)
     write.csv(
